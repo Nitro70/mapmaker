@@ -1,0 +1,1378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- connect-src 'none': the page cannot send anything anywhere. Plans are read from disk and kept in this browser. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; worker-src 'self'; manifest-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Open a floor plan, drop a pin where you are, and see which way you are facing. Everything stays on your device.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Where am I">
+<meta name="theme-color" content="#0C1A24">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>Where am I</title>
+<style>
+  :root{
+    --ink:#0C1A24;
+    --panel:rgba(18,42,54,.82);
+    --line:#24404E;
+    --text:#E6EFF2;
+    --muted:#93AEB9;
+    --you:#FF4646;
+    --beam:#5CC8F5;
+    --warn:#FFC94A;
+    /* notch, Dynamic Island, home bar, and the sides of the notch in landscape */
+    --pad-t: env(safe-area-inset-top, 0px);
+    --pad-b: env(safe-area-inset-bottom, 0px);
+    --pad-l: env(safe-area-inset-left, 0px);
+    --pad-r: env(safe-area-inset-right, 0px);
+    --dock-h: 56px;
+    --chip-h: 44px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%; margin:0; overflow:hidden; overscroll-behavior:none;}
+  body{
+    background:var(--ink); color:var(--text);
+    font:16px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    font-variant-numeric:tabular-nums;
+    -webkit-user-select:none; user-select:none;
+    -webkit-touch-callout:none;
+    -webkit-text-size-adjust:100%; text-size-adjust:100%;
+    position:fixed; inset:0;
+  }
+  button, label{
+    cursor:pointer; font-family:inherit;
+    touch-action:manipulation;          /* no double-tap zoom, no tap delay */
+  }
+  button{-webkit-appearance:none; appearance:none; margin:0;}
+  /* pressed feedback for fingers */
+  .tog, .chip, .act, #modebar button, #empty label{transition:transform .08s ease-out;}
+  .tog:active, .chip:active, .act:active:not(:disabled), #modebar button:active{transform:scale(.95);}
+  #empty label:active{transform:scale(.97);}
+  .row:active{background:rgba(255,255,255,.06);}
+  canvas{position:absolute; inset:0; width:100%; height:100%; touch-action:none; display:block; cursor:grab;}
+  canvas:active{cursor:grabbing;}
+
+  /* top: heading readout and hint, with the round buttons underneath on the right */
+  #top{
+    position:absolute; top:calc(var(--pad-t) + 10px);
+    left:calc(var(--pad-l) + 12px); right:calc(var(--pad-r) + 12px);
+    display:flex; flex-direction:column; gap:8px; pointer-events:none;
+  }
+  #head{
+    width:100%; max-width:640px; margin:0 auto;
+    display:flex; gap:10px; align-items:flex-start;
+  }
+  #bearing{
+    flex:0 0 auto;
+    background:var(--panel); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border:1px solid var(--line); border-radius:14px; padding:8px 12px; min-width:104px;
+  }
+  #bearing b{display:block; font-size:26px; font-weight:600; letter-spacing:-.5px; line-height:1.1;}
+  #bearing span{font-size:11px; color:var(--muted); white-space:nowrap;}
+  #hint{
+    background:var(--panel); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border:1px solid var(--line); border-radius:14px; padding:9px 12px;
+    font-size:13px; color:var(--muted); flex:1; min-width:0; min-height:44px;
+    overflow-wrap:anywhere;
+  }
+  #hint.alert{color:var(--warn); border-color:#5a4a1e;}
+
+  #side{
+    align-self:flex-end; pointer-events:auto;
+    display:flex; flex-direction:column; gap:8px;
+  }
+  .tog{
+    width:52px; height:52px; border-radius:16px; border:1px solid var(--line);
+    background:var(--panel); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    color:var(--text); font-size:11px; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:3px; padding:0;
+  }
+  .tog svg{width:20px; height:20px;}
+  .tog.on{background:#17414f; border-color:#3d8ba3; color:#BEEBFA;}
+  .tog:disabled{opacity:.35;}
+
+  /* bottom: floor chips (or the confirm bar) above the action dock */
+  #floors, #modebar{bottom:calc(var(--pad-b) + var(--dock-h) + 20px);}
+  #floors{
+    position:absolute; left:0; right:0;
+    display:flex; gap:7px; overflow-x:auto; overscroll-behavior-x:contain;
+    padding:0 calc(var(--pad-r) + 10px) 0 calc(var(--pad-l) + 10px);
+    scroll-padding:0 calc(var(--pad-r) + 10px) 0 calc(var(--pad-l) + 10px);
+    -webkit-overflow-scrolling:touch; scrollbar-width:none;
+  }
+  #floors::-webkit-scrollbar{display:none;}
+  .chip{
+    flex:0 0 auto; height:var(--chip-h); padding:0 16px; border-radius:22px;
+    border:1px solid var(--line); background:var(--panel);
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    color:var(--muted); font-size:14px; white-space:nowrap; max-width:46vw;
+    overflow:hidden; text-overflow:ellipsis;
+  }
+  .chip.on{background:#1D6B7F; border-color:#3d8ba3; color:#fff; font-weight:500;}
+  .chip.pinned::after{content:'\2022'; color:var(--you); margin-left:7px; font-size:18px; line-height:0;}
+  .chip.on.pinned::after{color:#FFD3D3;}
+  .chip.add{color:var(--muted); font-size:22px; padding:0 18px; display:flex; align-items:center;}
+
+  #dock, #modebar{
+    position:absolute; left:calc(var(--pad-l) + 10px); right:calc(var(--pad-r) + 10px);
+    max-width:640px; margin:0 auto; gap:8px;
+  }
+  #dock{bottom:calc(var(--pad-b) + 10px); display:flex;}
+  .act{
+    flex:1 1 0; min-width:0; min-height:var(--dock-h); border-radius:18px; border:1px solid var(--line);
+    background:var(--panel); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    color:var(--text); font-size:13px; font-weight:500; line-height:1.2; padding:6px 4px;
+  }
+  .act.primary{background:#1D6B7F; border-color:#3d8ba3;}
+  .act.ghost{color:var(--muted);}
+  .act:disabled{opacity:.35;}
+
+  #modebar{display:none;}
+  #modebar.show{display:flex;}
+  #modebar button{
+    flex:1 1 0; min-width:0; min-height:50px; border-radius:16px; border:1px solid var(--line);
+    background:var(--panel); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    color:var(--text); font-size:15px;
+  }
+  #modebar button.go{background:var(--you); border-color:var(--you); color:#fff; font-weight:600;}
+
+  /* start screen: scrolls when it does not fit (a phone on its side), centred when it does */
+  #empty{
+    position:absolute; inset:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+    display:flex; flex-direction:column;
+    padding:calc(var(--pad-t) + 24px) calc(var(--pad-r) + 24px) calc(var(--pad-b) + 24px) calc(var(--pad-l) + 24px);
+  }
+  #empty .inner{
+    margin:auto; display:flex; flex-direction:column; align-items:center;
+    gap:14px; text-align:center;
+  }
+  #empty h1{font-size:26px; font-weight:600; letter-spacing:-.6px; margin:0;}
+  #empty p{color:var(--muted); font-size:14px; max-width:31ch; margin:0;}
+  #empty label{
+    margin-top:6px; min-height:48px; padding:14px 22px; border-radius:16px; border:none;
+    background:#1D6B7F; color:#fff; font-size:16px; font-weight:500;
+  }
+  #empty label.plain{margin-top:0; min-height:44px; padding:11px 18px; background:none; color:var(--muted); font-size:15px;}
+  #empty #emptyMsg{color:var(--warn);}
+  #empty #tip{
+    margin-top:10px; max-width:34ch; font-size:13px; padding:10px 14px;
+    border:1px solid var(--line); border-radius:14px; background:rgba(18,42,54,.6);
+  }
+  #empty #tip.warn{color:var(--warn); border-color:#5a4a1e;}
+  .rings{width:96px; height:96px; opacity:.9;}
+  #loading{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:14px;}
+
+  .hidden{display:none !important;}
+  /* kept in the layout (not display:none) so a <label> can open it everywhere */
+  input[type=file]{position:absolute; top:0; left:0; width:1px; height:1px; opacity:0; z-index:-1;}
+
+  #veil{
+    position:absolute; inset:0; background:rgba(6,14,20,.62);
+    display:flex; align-items:flex-end; justify-content:center;
+    padding:calc(var(--pad-t) + 14px) calc(var(--pad-r) + 14px) calc(var(--pad-b) + 14px) calc(var(--pad-l) + 14px);
+  }
+  /* a dialog with a text box sits at the top, so the on-screen keyboard cannot cover it */
+  #veil.top{align-items:flex-start;}
+  .card{
+    width:100%; max-width:420px; max-height:100%; overflow-y:auto;
+    -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
+    background:#12252F; border:1px solid var(--line); border-radius:22px;
+  }
+  .card h2{font-size:14px; font-weight:500; color:var(--muted); margin:0; padding:15px 18px 9px;}
+  .row{
+    display:block; width:100%; min-height:52px; text-align:left; background:none; border:none; border-radius:0;
+    border-top:1px solid var(--line); color:var(--text); font-size:16px;
+    padding:15px 18px; font-family:inherit;
+  }
+  .row.danger{color:#FF8A7A;}
+  .row.cancel{color:var(--muted);}
+  .note{padding:0 18px 14px; margin:0; color:var(--muted); font-size:13px;}
+  .note.warn{color:var(--warn);}
+  #dlgInput{
+    display:block; width:calc(100% - 36px); margin:4px 18px 16px; padding:13px 14px;
+    font-size:17px;                     /* 16px or more stops iOS zooming in on focus */
+    -webkit-appearance:none; appearance:none;
+    border-radius:12px; border:1px solid var(--line); background:#0C1A24; color:var(--text);
+    font-family:inherit; -webkit-user-select:text; user-select:text;
+  }
+  #dlgMsg{padding:0 18px 16px; color:var(--muted); font-size:14px; margin:0;}
+  #crash{
+    position:absolute; left:calc(var(--pad-l) + 10px); right:calc(var(--pad-r) + 10px);
+    top:calc(var(--pad-t) + 10px);
+    background:#3A1414; border:1px solid #7A2B2B; color:#FFD9D2;
+    border-radius:14px; padding:12px 14px; font-size:13px; z-index:99;
+    -webkit-user-select:text; user-select:text;
+  }
+
+  /* narrow phones (iPhone SE and smaller) */
+  @media (max-width:359px){
+    #bearing{min-width:88px; padding:7px 10px;}
+    #bearing b{font-size:22px;}
+    .act{font-size:12px;}
+    #empty h1{font-size:23px;}
+  }
+
+  /* phone on its side: little height, so the round buttons go in a row beside the
+     hint and everything gets a bit shorter, leaving room to see the plan */
+  @media (orientation:landscape) and (max-height:520px){
+    :root{ --dock-h:46px; }
+    #top{flex-direction:row; align-items:flex-start;}
+    #head{flex:1 1 auto; min-width:0; max-width:none; margin:0;}
+    #side{flex-direction:row; align-self:flex-start;}
+    .tog{width:48px; height:48px; font-size:10px;}
+    #bearing{padding:6px 10px; min-width:92px;}
+    #bearing b{font-size:21px;}
+    #hint{min-height:0;}
+    #modebar button{min-height:44px;}
+    .rings{width:64px; height:64px;}
+    #empty .inner{gap:10px;}
+    #empty p{max-width:52ch;}
+  }
+</style>
+</head>
+<body>
+
+<canvas id="cv"></canvas>
+
+<div id="loading" class="hidden">Opening your plans…</div>
+
+<div id="empty" class="hidden"><div class="inner">
+  <svg class="rings" viewBox="0 0 100 100" fill="none" stroke="#5CC8F5" stroke-width="1.5">
+    <circle cx="50" cy="50" r="46" opacity=".25"/><circle cx="50" cy="50" r="30" opacity=".45"/>
+    <path d="M50 12 L58 40 L50 34 L42 40 Z" fill="#FF4646" stroke="none"/>
+    <circle cx="50" cy="50" r="5" fill="#FF4646" stroke="none"/>
+  </svg>
+  <h1>Where am I</h1>
+  <p>Open one floor plan or a whole stack of them, drop a pin where you're standing, and the compass shows which way you're facing. Your plans are saved in this browser on this device and are never uploaded.</p>
+  <label for="fileImg" id="openFirst" role="button" tabindex="0">Open floor plans</label>
+  <label for="fileJson" id="openSaved" class="plain" role="button" tabindex="0">Open a saved file</label>
+  <p id="emptyMsg" class="hidden"></p>
+  <p id="tip" class="hidden"></p>
+</div></div>
+
+<div id="top">
+<div id="head" class="hidden">
+  <div id="bearing"><b id="degTxt">--</b><span id="degSub">no heading yet</span></div>
+  <div id="hint">Drop a pin where you're standing.</div>
+</div>
+
+<div id="side" class="hidden">
+  <button class="tog" id="btnCompass" title="Compass">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 10 10.5 8.5 15.5 14 13.5Z" fill="currentColor" stroke="none"/></svg>
+    Compass
+  </button>
+  <button class="tog" id="btnTrack" title="Rotate map with me">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v4M12 21v-3"/><path d="M4.5 8.5 12 5l7.5 3.5-7.5 12.5z"/></svg>
+    Track up
+  </button>
+  <button class="tog" id="btnCenter" title="Centre on me">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+    Centre
+  </button>
+</div>
+</div>
+
+<div id="floors" class="hidden"></div>
+
+<div id="modebar">
+  <button id="modeCancel">Cancel</button>
+  <button id="modeGo" class="go">Confirm</button>
+</div>
+
+<div id="dock" class="hidden">
+  <button class="act primary" id="btnPlace">Set position</button>
+  <button class="act" id="btnFace">Set facing</button>
+  <button class="act" id="btnCal">Align map</button>
+  <button class="act ghost" id="btnFiles">Maps</button>
+</div>
+
+<input type="file" id="fileImg" accept="image/*" multiple>
+<input type="file" id="fileJson" accept="application/json,.json">
+
+<div id="veil" class="hidden">
+  <div class="card" id="sheet">
+    <h2>Maps</h2>
+    <p class="note" id="storeNote"></p>
+    <label class="row sheetclose" for="fileImg">Add more plans</label>
+    <label class="row sheetclose" for="fileJson">Open a saved file</label>
+    <button class="row" id="rowSave">Save all maps to a file</button>
+    <button class="row" id="rowRename">Rename this plan</button>
+    <button class="row danger" id="rowRemove">Remove this plan</button>
+    <button class="row danger" id="rowWipe">Delete everything on this device</button>
+    <button class="row cancel" id="rowClose">Close</button>
+  </div>
+  <div class="card hidden" id="dialog">
+    <h2 id="dlgTitle">Name</h2>
+    <p id="dlgMsg" class="hidden"></p>
+    <input id="dlgInput" class="hidden" type="text" autocomplete="off" autocapitalize="words" enterkeyhint="done">
+    <button class="row" id="dlgOk">OK</button>
+    <button class="row hidden" id="dlgAlt"></button>
+    <button class="row cancel" id="dlgNo">Cancel</button>
+  </div>
+</div>
+
+<script>
+window.onerror = function(msg, src, line){
+  var b = document.getElementById('crash');
+  if(!b){
+    b = document.createElement('div'); b.id='crash'; document.body.appendChild(b);
+  }
+  b.textContent = 'Something broke: ' + msg + ' (line ' + line + '). Tap to dismiss.';
+  b.onclick = function(){ b.remove(); };
+  return false;
+};
+
+(function(){
+"use strict";
+
+var S = {
+  maps:[], idx:-1,
+  compass:null, accuracy:null,
+  compassOn:false, trackUp:false,
+  mode:null, draft:null,
+  unread:[],           // saved plans whose picture would not open this time; kept untouched
+  ready:false          // set once the saved session is back; nothing is written before that
+};
+function M(){ return S.idx>=0 ? S.maps[S.idx] : null; }
+
+var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+var W=0, H=0, DPR=1;
+
+function $(id){ return document.getElementById(id); }
+function noop(){}
+function rad(d){ return d*Math.PI/180; }
+function norm(d){ d%=360; return d<0?d+360:d; }
+function num(v){ return (typeof v==='number' && isFinite(v)) ? v : null; }
+function cleanPos(p){ return (p && num(p.x)!=null && num(p.y)!=null) ? {x:p.x, y:p.y} : null; }
+function newId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
+function plural(n, word){ return n+' '+word+(n===1?'':'s'); }
+
+var UA = navigator.userAgent || '';
+var IOS = /iP(hone|ad|od)/.test(UA) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+var MAC_SAFARI = !IOS && /Macintosh/.test(UA) && /Safari\//.test(UA) && !/Chrome|Chromium|Edg\/|OPR\/|Firefox/.test(UA);
+function standalone(){
+  return navigator.standalone===true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+}
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 3);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  render();                             // resizing clears the canvas: repaint now, not next frame
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', function(){ setTimeout(resize,300); });
+
+// ------------------------------------------------------------ on-device storage
+// Everything is kept in this browser's IndexedDB and nowhere else. Each image is
+// written once, into its own store, when the plan is added. The small "session"
+// record (names, pins, headings, where you left the view) is rewritten when this
+// tab changes something. All writes go through one queue so they land in order.
+var NO_STORE='This browser is not letting the page save, so your plans will be gone when you close it. Use Maps, then "Save all maps to a file" to keep them.';
+var READ_FAIL='Your saved plans could not be read just now. They have not been touched. Close this page completely (or swipe the app away) and open it again. Until then, nothing you do here is saved.';
+
+var store = (function(){
+  var dbp=null, state='pending', chain=Promise.resolve(), locked=false, failing=false, bc=null;
+  try{ if(window.BroadcastChannel) bc = new BroadcastChannel('where-am-i'); }catch(e){}
+
+  function open(){
+    if(dbp) return dbp;
+    var p = new Promise(function(res){
+      var done=false, req;
+      function finish(d){
+        if(done){ if(d) d.close(); return; }
+        done=true; state = d ? 'on' : 'off'; res(d);
+      }
+      if(typeof indexedDB==='undefined' || !indexedDB){ finish(null); return; }
+      // an open that never answers must not leave the app stuck on a blank screen
+      setTimeout(function(){ finish(null); }, 6000);
+      try{ req = indexedDB.open('where-am-i', 1); }catch(e){ finish(null); return; }
+      req.onupgradeneeded = function(){
+        var d=req.result;
+        if(!d.objectStoreNames.contains('images')) d.createObjectStore('images');
+        if(!d.objectStoreNames.contains('meta')) d.createObjectStore('meta');
+      };
+      req.onsuccess = function(){
+        var d=req.result;
+        // iOS can drop the connection while the app sits in the background.
+        // Forget a dead connection so the next use opens a fresh one.
+        d.onversionchange = function(){ try{ d.close(); }catch(e){} if(dbp===p) dbp=null; };
+        d.onclose = function(){ if(dbp===p) dbp=null; };
+        finish(d);
+      };
+      req.onerror = function(){ finish(null); };
+    });
+    dbp = p;
+    return p;
+  }
+
+  // A closed or lost connection ("Connection to Indexed Database server lost")
+  // surfaces as one of these. Reopen once and try again before giving up.
+  function lost(err){ return !!err && (err.name==='InvalidStateError' || err.name==='UnknownError'); }
+
+  function tx(stores, mode, work, retried){
+    return open().then(function(d){
+      if(!d) throw new Error('unavailable');
+      return new Promise(function(res, rej){
+        var t = d.transaction(stores, mode);
+        var out = work(t);
+        t.oncomplete = function(){ res(out); };
+        // WebKit reports a failed put (quota included) on the request, before t.error is set
+        t.onerror = function(ev){ rej((ev && ev.target && ev.target.error) || t.error || new Error('failed')); };
+        t.onabort = function(){ rej(t.error || new Error('aborted')); };
+      });
+    }).catch(function(err){
+      if(!retried && lost(err)){ dbp=null; return tx(stores, mode, work, true); }
+      throw err;
+    });
+  }
+
+  function report(err){
+    failing = true;
+    var name = (err && err.name) || (err && err.message) || 'Error';
+    if(state==='off' || (err && err.message==='unavailable')) say(NO_STORE, true);
+    else if(name==='QuotaExceededError') say('This device has no room left for more plans. Remove one, or save them to a file.', true);
+    else say('Could not save on this device ('+name+'). Save your maps to a file to be safe.', true);
+  }
+
+  // Writes are refused once the store is locked: after a failed read at start-up
+  // (so nothing is written over plans we could not see) or after another tab saved
+  // (so this tab's out-of-date copy cannot overwrite it).
+  function queue(fn){
+    if(locked) return chain;
+    chain = chain.then(function(){ if(!locked) return fn(); }).then(function(){
+      failing = false;
+      if(bc){ try{ bc.postMessage('saved'); }catch(e){} }
+    }, report);
+    return chain;
+  }
+  function writeTx(stores, work){ return function(){ return tx(stores, 'readwrite', work); }; }
+
+  return {
+    state: function(){ return state; },
+    failing: function(){ return failing; },
+    locked: function(){ return locked; },
+    lock: function(){ locked = true; },
+    // fn runs when another tab of this app has saved something
+    onOtherTab: function(fn){ if(bc) bc.onmessage = fn; },
+
+    // -> { session, images:{id:{data,name}} } or null when storage is unavailable
+    load: function(){
+      return open().then(function(d){
+        if(!d) return null;
+        return tx(['meta','images'], 'readonly', function(t){
+          var out = { session:null, images:{} };
+          var mr = t.objectStore('meta').get('session');
+          mr.onsuccess = function(){ out.session = mr.result || null; };
+          var cr = t.objectStore('images').openCursor();
+          cr.onsuccess = function(){
+            var c = cr.result;
+            if(c){ out.images[c.key] = c.value; c.continue(); }
+          };
+          return out;
+        });
+      });
+    },
+
+    putImage: function(id, rec){
+      return queue(writeTx(['images'], function(t){ t.objectStore('images').put(rec, id); }));
+    },
+    dropImage: function(id){
+      return queue(writeTx(['images'], function(t){ t.objectStore('images').delete(id); }));
+    },
+    putSession: function(rec){
+      if(state==='off') return chain;
+      return queue(writeTx(['meta'], function(t){ t.objectStore('meta').put(rec, 'session'); }));
+    },
+    // swap every stored plan for a new set in one step, so a half-finished swap can't be left behind
+    replaceAll: function(images, rec){
+      return queue(writeTx(['images','meta'], function(t){
+        var s = t.objectStore('images');
+        s.clear();
+        Object.keys(images).forEach(function(id){ s.put(images[id], id); });
+        t.objectStore('meta').put(rec, 'session');
+      }));
+    },
+    wipe: function(){
+      return queue(writeTx(['images','meta'], function(t){
+        t.objectStore('images').clear();
+        t.objectStore('meta').clear();
+      }));
+    }
+  };
+})();
+
+function imageRec(m){ return { data:m.data, name:m.name }; }
+function session(){
+  return { v:1, idx:S.idx, trackUp:S.trackUp, maps:S.maps.map(function(m){
+    return { id:m.id, name:m.name, pos:m.pos, heading:m.heading, northOffset:m.northOffset,
+             cx:m.cx, cy:m.cy, scale:m.scale };
+  }).concat(S.unread) };   // plans that would not open this time are kept exactly as they were
+}
+
+// dirty() is called for real changes made in this tab (panning, pins, names...),
+// never for redraws, compass ticks or resizes. The session is then rewritten at
+// most every 400 ms, and straight away when the page is hidden, because iOS may
+// kill it after that without any further warning.
+var saveTimer=0, changed=false, staleReload=false;
+function dirty(){
+  if(!S.ready) return;
+  changed=true;
+  if(!saveTimer) saveTimer=setTimeout(flush, 400);
+}
+function flush(){
+  if(saveTimer){ clearTimeout(saveTimer); saveTimer=0; }
+  if(S.ready && changed){ changed=false; store.putSession(session()); }
+}
+function saveNow(){ if(S.ready){ changed=true; flush(); } }
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState==='hidden') flush();
+  else if(staleReload) location.reload();
+});
+window.addEventListener('pagehide', flush);
+
+// Another tab saved, so this tab's copy is out of date. Stop it writing at once,
+// and reload it (now, or as soon as it is looked at again) to pick up the changes.
+store.onOtherTab(function(){
+  S.ready=false; changed=false;
+  if(saveTimer){ clearTimeout(saveTimer); saveTimer=0; }
+  store.lock();
+  if(document.visibilityState==='visible') location.reload();
+  else staleReload=true;
+});
+
+// Ask the browser not to evict our data under storage pressure. Safari grants this
+// to Home Screen apps; elsewhere it is a hint at best. Harmless when refused.
+var askedPersist=false;
+function askPersist(){
+  if(askedPersist) return;
+  askedPersist=true;
+  try{
+    if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(noop);
+  }catch(e){}
+}
+
+// ------------------------------------------------------------ transforms
+function viewRot(){ var m=M(); return (S.trackUp && m && m.heading!=null) ? -rad(m.heading) : 0; }
+function rot(a,x,y){ var c=Math.cos(a), s=Math.sin(a); return {x:x*c-y*s, y:x*s+y*c}; }
+function mapToScreen(p){
+  var m=M(), v = rot(viewRot(), (p.x-m.cx)*m.scale, (p.y-m.cy)*m.scale);
+  return {x:v.x+W/2, y:v.y+H/2};
+}
+function screenToMap(p){
+  var m=M(), v = rot(-viewRot(), p.x-W/2, p.y-H/2);
+  return {x:m.cx+v.x/m.scale, y:m.cy+v.y/m.scale};
+}
+function anchor(mapPt, screenPt){
+  var m=M(), v = rot(-viewRot(), screenPt.x-W/2, screenPt.y-H/2);
+  m.cx = mapPt.x - v.x/m.scale;
+  m.cy = mapPt.y - v.y/m.scale;
+}
+function clampScale(s){ return Math.max(0.05, Math.min(12, s)); }
+
+// ------------------------------------------------------------ drawing
+// Touch and compass events can arrive faster than the screen refreshes (120 Hz
+// iPhones send more than that), so draw() only books one repaint per frame.
+var drawQueued=false;
+function draw(){
+  if(drawQueued) return;
+  drawQueued=true;
+  requestAnimationFrame(function(){ drawQueued=false; render(); });
+}
+function render(){
+  ctx.clearRect(0,0,W,H);
+  var m = M(); if(!m || !m.img) return;
+
+  ctx.save();
+  ctx.translate(W/2,H/2); ctx.rotate(viewRot()); ctx.scale(m.scale,m.scale);
+  ctx.translate(-m.cx,-m.cy);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(m.img,0,0,m.w,m.h);
+  ctx.restore();
+
+  var shown = (S.mode==='face'||S.mode==='cal') && S.draft!=null ? S.draft : m.heading;
+
+  if(m.pos){
+    var p = mapToScreen(m.pos);
+    ctx.save(); ctx.translate(p.x,p.y);
+    if(shown!=null){
+      ctx.save(); ctx.rotate(rad(shown)+viewRot());
+      var g = ctx.createLinearGradient(0,0,0,-124);
+      g.addColorStop(0,'rgba(92,200,245,.55)'); g.addColorStop(1,'rgba(92,200,245,0)');
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.arc(0,0,124,-Math.PI/2-0.42,-Math.PI/2+0.42); ctx.closePath();
+      ctx.fillStyle=g; ctx.fill();
+      ctx.beginPath(); ctx.moveTo(0,-34); ctx.lineTo(9,-18); ctx.lineTo(-9,-18); ctx.closePath();
+      ctx.fillStyle='#5CC8F5'; ctx.fill();
+      ctx.restore();
+    }
+    ctx.beginPath(); ctx.arc(0,0,15,0,6.284);
+    ctx.fillStyle='rgba(255,70,70,.22)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(0,0,8,0,6.284);
+    ctx.fillStyle='#FF4646'; ctx.fill();
+    ctx.lineWidth=2.5; ctx.strokeStyle='rgba(255,255,255,.9)'; ctx.stroke();
+    ctx.restore();
+  }
+
+  if(S.compassOn || m.northOffset){
+    // just above the floor chips, inside the safe area (clear of the notch in landscape)
+    var dock=$('dock').getBoundingClientRect();
+    var nx = (dock.width ? dock.left : 10) + 30, ny = (dock.height ? dock.top : H-66) - 88;
+    var a=-rad(m.northOffset)+viewRot();
+    ctx.save(); ctx.translate(nx,ny); ctx.rotate(a);
+    ctx.beginPath(); ctx.moveTo(0,-20); ctx.lineTo(6,4); ctx.lineTo(0,-1); ctx.lineTo(-6,4); ctx.closePath();
+    ctx.fillStyle='rgba(230,239,242,.75)'; ctx.fill();
+    ctx.restore();
+    ctx.save(); ctx.translate(nx,ny);
+    ctx.fillStyle='rgba(147,174,185,.9)'; ctx.font='11px -apple-system,system-ui,sans-serif';
+    ctx.textAlign='center'; ctx.fillText('N',0,20); ctx.restore();
+  }
+
+  if(S.mode==='place'){
+    ctx.save(); ctx.translate(W/2,H/2);
+    ctx.strokeStyle='#FF4646'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(0,0,20,0,6.284); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-34,0); ctx.lineTo(-8,0); ctx.moveTo(8,0); ctx.lineTo(34,0);
+    ctx.moveTo(0,-34); ctx.lineTo(0,-8); ctx.moveTo(0,8); ctx.lineTo(0,34);
+    ctx.stroke(); ctx.restore();
+  }
+}
+
+// ------------------------------------------------------------ gestures
+var last=null, pinch=null, touching=false;
+function pt(t){ var r=cv.getBoundingClientRect(); return {x:t.clientX-r.left, y:t.clientY-r.top}; }
+
+// (re)start a pan or pinch from whichever fingers are down right now
+function grip(ts){
+  touching = ts.length>0;
+  pinch=null; last=null;
+  if(ts.length===1){
+    last=pt(ts[0]);
+  }else if(ts.length===2){
+    var a=pt(ts[0]), b=pt(ts[1]);
+    pinch={ d:Math.hypot(a.x-b.x,a.y-b.y), mid:{x:(a.x+b.x)/2,y:(a.y+b.y)/2} };
+    pinch.map=screenToMap(pinch.mid);
+  }
+}
+cv.addEventListener('touchstart', function(e){
+  if(!M()) return;
+  e.preventDefault();
+  grip(e.touches);
+  if(last && (S.mode==='face'||S.mode==='cal')) spin(last);
+},{passive:false});
+
+cv.addEventListener('touchmove', function(e){
+  if(!M()) return;
+  e.preventDefault();
+  var ts=e.touches;
+  if(ts.length===1 && last){
+    var p=pt(ts[0]);
+    if(S.mode==='face'||S.mode==='cal'){ spin(p); }
+    else{ anchor(screenToMap(last), p); dirty(); }
+    last=p; draw();
+  }else if(ts.length===2 && pinch){
+    var a=pt(ts[0]), b=pt(ts[1]);
+    var d=Math.hypot(a.x-b.x,a.y-b.y), mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2};
+    var m=M();
+    m.scale = clampScale(m.scale*(d/(pinch.d||d)));
+    anchor(pinch.map, mid);
+    pinch.d=d; pinch.mid=mid; pinch.map=screenToMap(mid);
+    dirty(); draw();
+  }
+},{passive:false});
+
+function touchEnd(e){
+  e.preventDefault();
+  // lifting one finger of a pinch carries on as a pan with the finger that is left
+  if(M()) grip(e.touches); else { touching = e.touches.length>0; last=null; pinch=null; }
+}
+cv.addEventListener('touchend', touchEnd, {passive:false});
+cv.addEventListener('touchcancel', touchEnd, {passive:false});
+
+cv.addEventListener('mousedown', function(e){
+  if(!M()) return;
+  last=pt(e);
+  if(S.mode==='face'||S.mode==='cal') spin(last);
+});
+window.addEventListener('mousemove', function(e){
+  if(!last||!M()||touching) return;
+  var p=pt(e);
+  if(S.mode==='face'||S.mode==='cal'){ spin(p); } else { anchor(screenToMap(last), p); dirty(); }
+  last=p; draw();
+});
+window.addEventListener('mouseup', function(){ if(!touching) last=null; });
+cv.addEventListener('wheel', function(e){
+  if(!M()) return;
+  e.preventDefault();
+  var p=pt(e), mp=screenToMap(p), m=M();
+  var k = Math.exp(-e.deltaY*(e.deltaMode===1 ? 0.05 : 0.0025));
+  m.scale = clampScale(m.scale*Math.max(0.5, Math.min(2, k)));
+  anchor(mp,p); dirty(); draw();
+},{passive:false});
+
+// Safari only: gesture events. On iPhone they would zoom the whole page, so they
+// are always cancelled (the touch handlers above do the pinch). On a Mac trackpad
+// they are the only pinch signal Safari gives, so they zoom the plan.
+var gz=null;
+function veilOpen(){ return !$('veil').classList.contains('hidden'); }
+document.addEventListener('gesturestart', function(e){
+  e.preventDefault();
+  gz=null;
+  if(touching || !M() || veilOpen()) return;
+  var p = (typeof e.clientX==='number') ? pt(e) : {x:W/2, y:H/2};
+  gz={ scale:M().scale, p:p, map:screenToMap(p) };
+});
+document.addEventListener('gesturechange', function(e){
+  e.preventDefault();
+  if(!gz || !M()) return;
+  M().scale = clampScale(gz.scale*e.scale);
+  anchor(gz.map, gz.p); dirty(); draw();
+});
+document.addEventListener('gestureend', function(e){ e.preventDefault(); gz=null; });
+
+function spin(p){
+  var m=M(), o = m.pos ? mapToScreen(m.pos) : {x:W/2,y:H/2};
+  var dx=p.x-o.x, dy=p.y-o.y;
+  if(Math.hypot(dx,dy)<12) return;
+  var screenBearing = norm(Math.atan2(dx,-dy)*180/Math.PI);
+  S.draft = norm(screenBearing - viewRot()*180/Math.PI);
+  readout(); draw();
+}
+
+// ------------------------------------------------------------ compass
+var listening=false;
+function applyCompass(){
+  if(S.compass==null) return;
+  for(var i=0;i<S.maps.length;i++){
+    if(S.mode!=='face' && S.mode!=='cal' || i!==S.idx)
+      S.maps[i].heading = norm(S.compass - S.maps[i].northOffset);
+  }
+}
+function onOrient(e){
+  var h=null;
+  if(typeof e.webkitCompassHeading==='number' && !isNaN(e.webkitCompassHeading)){
+    h = e.webkitCompassHeading;
+    S.accuracy = (typeof e.webkitCompassAccuracy==='number') ? e.webkitCompassAccuracy : null;
+  }else if(e.absolute && typeof e.alpha==='number'){
+    h = norm(360 - e.alpha);
+  }
+  if(h==null) return;
+  S.compass=h; applyCompass(); readout(); draw();
+}
+function startCompass(){
+  var D = window.DeviceOrientationEvent;
+  if(!D){ say('This browser has no compass. Use "Set facing" to point the arrow by hand.', true); return; }
+  function attach(){
+    if(!listening){
+      window.addEventListener('deviceorientation', onOrient, true);
+      // Chrome on Android only reports true north through this one
+      if('ondeviceorientationabsolute' in window) window.addEventListener('deviceorientationabsolute', onOrient, true);
+      listening=true;
+    }
+    S.compassOn=true; sync();
+    setTimeout(function(){
+      if(S.compassOn && S.compass==null) say('No compass readings yet. Hold the phone flat and move it in a figure-8, or use "Set facing".', true);
+    },2500);
+  }
+  if(typeof D.requestPermission==='function'){
+    D.requestPermission().then(function(r){
+      if(r==='granted'){ attach(); }
+      else{ say('Compass access was denied. Close this page completely and open it again to be asked again, or use "Set facing".', true); }
+    }).catch(function(){
+      say('The compass needs the page to be opened over https. Use "Set facing" instead.', true);
+    });
+  }else{ attach(); }
+}
+function stopCompass(){
+  if(listening){
+    window.removeEventListener('deviceorientation', onOrient, true);
+    window.removeEventListener('deviceorientationabsolute', onOrient, true);
+    listening=false;
+  }
+  S.compassOn=false; S.compass=null; sync();
+}
+
+// ------------------------------------------------------------ ui
+function say(t,alert){
+  var h=$('hint'); h.textContent=t; h.className = alert?'alert':'';
+  // the hint bar is hidden on the start screen, so problems are repeated there
+  var e=$('emptyMsg'); e.textContent = alert ? t : ''; e.classList.toggle('hidden', !alert);
+}
+function cardinal(d){ var n=['N','NE','E','SE','S','SW','W','NW']; return n[Math.round(norm(d)/45)%8]; }
+function readout(){
+  var m=M();
+  var h = (S.mode==='face'||S.mode==='cal') && S.draft!=null ? S.draft : (m?m.heading:null);
+  if(h==null){ $('degTxt').textContent='--'; $('degSub').textContent='no heading yet'; return; }
+  $('degTxt').textContent = Math.round(norm(h))+'°';
+  if(S.compassOn && S.compass!=null){
+    var t='true '+Math.round(S.compass)+'° '+cardinal(S.compass);
+    if(S.accuracy!=null && S.accuracy>25) t+=' · low accuracy';
+    $('degSub').textContent=t;
+  }else{
+    $('degSub').textContent='on this plan';
+  }
+}
+function chips(){
+  var box=$('floors');
+  box.innerHTML='';
+  if(S.maps.length===0){ box.classList.add('hidden'); return; }
+  box.classList.toggle('hidden', !!S.mode);
+  S.maps.forEach(function(m,i){
+    var b=document.createElement('button');
+    b.className='chip'+(i===S.idx?' on':'')+(m.pos?' pinned':'');
+    b.textContent=m.name;
+    b.onclick=function(){
+      if(i===S.idx){ rename(i); } else { switchTo(i); }
+    };
+    box.appendChild(b);
+  });
+  var add=document.createElement('label');
+  add.className='chip add'; add.textContent='+';
+  add.setAttribute('for','fileImg');
+  add.style.display='flex'; add.style.alignItems='center';
+  box.appendChild(add);
+  var on=box.querySelector('.chip.on');
+  if(on) on.scrollIntoView({block:'nearest', inline:'center'});
+}
+function switchTo(i){
+  S.idx=i; S.draft=null;
+  var m=M();
+  say(m.pos ? m.name+'. Pin is where you left it.' : m.name+'. No pin on this one yet.');
+  dirty(); sync(); chips(); draw();
+}
+function rename(i){
+  if(i<0 || !S.maps[i]) return;
+  dialog({ title:'Name this plan', value:S.maps[i].name, ok:'Save', onOk:function(n){
+    if(n && String(n).trim()){ S.maps[i].name = String(n).trim().slice(0,24); dirty(); chips(); }
+  }});
+}
+function sync(){
+  var m=M();
+  $('btnCompass').classList.toggle('on', S.compassOn);
+  $('btnTrack').classList.toggle('on', S.trackUp);
+  $('btnCal').disabled = !(S.compassOn && m && m.pos);
+  $('btnFace').disabled = !(m && m.pos);
+  readout();
+}
+function setMode(mode, go){
+  S.mode=mode;
+  $('modebar').classList.toggle('show', !!mode);
+  $('modeGo').textContent = go||'Confirm';
+  chips(); draw();
+}
+
+$('btnPlace').onclick=function(){
+  S.draft=null; setMode('place','Drop pin here');
+  say('Pan the plan so the crosshair sits on you, then drop the pin. Pinch to zoom in first if you want to be precise.');
+};
+$('btnFace').onclick=function(){
+  var m=M(); S.draft = m.heading!=null?m.heading:0;
+  setMode('face','Set facing');
+  say('Drag around the red dot until the arrow points the way you are actually facing.');
+};
+$('btnCal').onclick=function(){
+  var m=M(); S.draft = m.heading!=null?m.heading:0;
+  setMode('cal','Align to compass');
+  say('Stand still, facing something you can find on this plan. Drag the arrow to point that way, then confirm.');
+};
+$('modeCancel').onclick=function(){
+  S.draft=null; setMode(null);
+  var m=M(); say(m && m.pos ? 'Ready.' : 'Drop a pin where you are standing.');
+  readout();
+};
+$('modeGo').onclick=function(){
+  var m=M();
+  if(S.mode==='place'){
+    m.pos = screenToMap({x:W/2,y:H/2});
+    setMode(null); say('Pin dropped. Turn on the compass, or set your facing by hand.');
+  }else if(S.mode==='face'){
+    m.heading=S.draft; setMode(null); say('Facing set.');
+  }else if(S.mode==='cal'){
+    if(S.compass!=null){
+      var off = norm(S.compass - S.draft);
+      setMode(null);
+      if(S.maps.length>1){
+        dialog({ title:'Align every plan?',
+          msg:'Use this alignment on all '+S.maps.length+' plans if they are drawn the same way up, which is normal for floors of one building.',
+          ok:'All plans', onOk:function(){ applyAlign(off,true); },
+          alt:'Just this one', onAlt:function(){ applyAlign(off,false); },
+          onNo:function(){ say('Alignment not changed.'); } });
+      }else{ applyAlign(off,false); }
+    }else{
+      say('No compass reading to align to.', true);
+      setMode(null);
+    }
+  }
+  S.draft=null; dirty(); sync(); chips(); draw();
+};
+
+function applyAlign(off, all){
+  var m=M();
+  if(all){ S.maps.forEach(function(x){ x.northOffset=off; }); }
+  else if(m){ m.northOffset=off; }
+  applyCompass();
+  say(all ? 'All plans aligned to the compass.' : (m?m.name:'Plan')+' aligned to the compass.');
+  dirty(); sync(); chips(); draw();
+}
+
+$('btnCompass').onclick=function(){ S.compassOn ? stopCompass() : startCompass(); };
+$('btnTrack').onclick=function(){ S.trackUp=!S.trackUp; dirty(); sync(); draw(); };
+$('btnCenter').onclick=function(){
+  var m=M();
+  if(!m.pos){ say('Drop a pin on this plan first.', true); return; }
+  m.cx=m.pos.x; m.cy=m.pos.y; dirty(); draw();
+};
+
+// ------------------------------------------------------------ sheet + dialog
+// (no browser popups: those are blocked in some viewers)
+function openSheet(){
+  storeNote();
+  $('veil').classList.remove('hidden', 'top');
+  $('sheet').classList.remove('hidden');
+  $('dialog').classList.add('hidden');
+}
+function closeVeil(){ $('veil').classList.add('hidden'); }
+$('btnFiles').onclick = openSheet;
+$('rowClose').onclick = closeVeil;
+$('rowSave').onclick = function(){ closeVeil(); saveProject(); };
+$('rowRename').onclick = function(){ rename(S.idx); };
+$('rowRemove').onclick = function(){ removeCurrent(); };
+$('rowWipe').onclick = function(){ wipeAll(); };
+Array.prototype.forEach.call(document.querySelectorAll('.sheetclose'), function(el){
+  el.addEventListener('click', function(){ setTimeout(closeVeil, 60); });
+});
+$('veil').addEventListener('click', function(e){
+  if(e.target!==this) return;          // a tap on the dimmed backdrop, not on a card
+  if(dlg) endDialog('no'); else closeVeil();
+});
+document.addEventListener('keydown', function(e){
+  if(e.key==='Escape' && veilOpen()){ if(dlg) endDialog('no'); else closeVeil(); }
+});
+
+function mb(n){ return (n/1048576).toFixed(n<10485760 ? 1 : 0)+' MB'; }
+function storeNote(){
+  var el=$('storeNote'), t, warn=true;
+  if(store.state()==='off') t=NO_STORE;
+  else if(store.locked()) t=READ_FAIL;
+  else if(store.failing()) t='Saving on this device is failing right now. Save all maps to a file so you do not lose them.';
+  else{
+    warn=false;
+    t='Saved automatically on this device only; nothing is uploaded. Private browsing windows forget everything when closed.';
+    if((IOS || MAC_SAFARI) && !standalone()){
+      var app = IOS ? 'Home Screen' : 'Dock';
+      t+=' Safari can clear saved plans after about a week without a visit. To keep them for good, save all maps to a file, add this page to your '+app+', and open the file there ('+app+' apps have their own storage, separate from Safari).';
+    }
+  }
+  el.textContent=t; el.className='note'+(warn?' warn':'');
+  if(warn) return;
+  try{
+    if(navigator.storage && navigator.storage.estimate){
+      navigator.storage.estimate().then(function(est){
+        if(est && est.usage) el.textContent = t+' Using '+mb(est.usage)+'.';
+      }).catch(noop);
+    }
+  }catch(e){}
+}
+
+var dlg=null;
+// o: { title, msg?, value? (shows a text box), ok, onOk(value), okDanger?, alt?, onAlt?, altDanger?, no?, onNo? }
+function dialog(o){
+  dlg=o;
+  $('sheet').classList.add('hidden');
+  $('veil').classList.remove('hidden');
+  $('dialog').classList.remove('hidden');
+  $('dlgTitle').textContent = o.title;
+  $('dlgMsg').textContent = o.msg||'';
+  $('dlgMsg').classList.toggle('hidden', !o.msg);
+  $('dlgOk').textContent = o.ok||'OK';
+  $('dlgOk').className = 'row'+(o.okDanger?' danger':'');
+  $('dlgAlt').textContent = o.alt||'';
+  $('dlgAlt').className = 'row'+(o.altDanger?' danger':'')+(o.alt?'':' hidden');
+  $('dlgNo').textContent = o.no||'Cancel';
+  $('veil').classList.toggle('top', o.value!=null);
+  var inp = $('dlgInput');
+  inp.classList.toggle('hidden', o.value==null);
+  if(o.value!=null){
+    inp.value = o.value;
+    try{ inp.focus(); inp.select(); }catch(e){}
+  }
+}
+function endDialog(which){
+  var o=dlg, v=$('dlgInput').value;
+  dlg=null; closeVeil();
+  if(!o) return;
+  if(which==='ok'){ if(o.onOk) o.onOk(o.value==null ? true : v); }
+  else if(which==='alt'){ if(o.onAlt) o.onAlt(); }
+  else if(o.onNo){ o.onNo(); }
+}
+$('dlgOk').onclick = function(){ endDialog('ok'); };
+$('dlgAlt').onclick = function(){ endDialog('alt'); };
+$('dlgNo').onclick = function(){ endDialog('no'); };
+$('dlgInput').addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); endDialog('ok'); } });
+// iOS can leave the whole page shifted up after the keyboard closes; put it back
+$('dlgInput').addEventListener('blur', function(){
+  setTimeout(function(){ if(window.scrollY || window.scrollX) window.scrollTo(0,0); }, 60);
+});
+
+// ------------------------------------------------------------ plans
+function removeCurrent(){
+  var m=M(); if(!m) return;
+  dialog({ title:'Remove '+m.name+'?', msg:'The pin and alignment on this plan go with it.',
+    ok:'Remove', okDanger:true, onOk:doRemove });
+}
+function doRemove(){
+  var gone=S.maps.splice(S.idx,1)[0];
+  // image first, then the session: a crash in between leaves a session that just skips it
+  if(gone) store.dropImage(gone.id);
+  if(S.maps.length===0){ S.idx=-1; saveNow(); goEmpty(); return; }
+  S.idx = Math.min(S.idx, S.maps.length-1);
+  saveNow();
+  switchTo(S.idx);
+}
+function wipeAll(){
+  var n=S.maps.length+S.unread.length;
+  dialog({ title:'Delete everything on this device?',
+    msg: n
+      ? 'All '+plural(n,'plan')+', with their pins and alignment, are erased from this browser. Save them to a file first if you might want them back.'
+      : 'Erases everything this page has saved in this browser.',
+    ok:'Delete everything', okDanger:true, onOk:function(){
+      store.wipe();
+      changed=false;
+      S.maps=[]; S.unread=[]; S.idx=-1; S.draft=null;
+      setMode(null); goEmpty();
+    }});
+}
+function goEmpty(){
+  $('empty').classList.remove('hidden');
+  $('head').classList.add('hidden');
+  $('side').classList.add('hidden');
+  $('dock').classList.add('hidden');
+  $('floors').classList.add('hidden');
+  $('emptyMsg').classList.add('hidden');
+  emptyExtras();
+  draw();
+}
+
+$('fileImg').onchange=function(e){
+  var files = Array.prototype.slice.call(e.target.files||[]);
+  e.target.value='';
+  if(!files.length) return;
+  files.sort(function(a,b){ return a.name.localeCompare(b.name, undefined, {numeric:true}); });
+  var startCount = S.maps.length;
+  say('Loading '+plural(files.length,'plan')+'…');
+  addNext(files, 0, startCount);
+};
+
+function addNext(files, i, startCount){
+  if(i>=files.length){
+    if(!S.maps.length){ say('None of those could be opened as a picture.', true); return; }
+    show();
+    if(S.idx<0 || S.idx>=S.maps.length) S.idx=startCount<S.maps.length?startCount:0;
+    dirty();
+    if(store.state()==='off') say(NO_STORE, true);
+    else if(store.locked()) say(READ_FAIL, true);
+    else say(S.maps.length>1
+      ? S.maps.length+' plans loaded. Tap a name below to switch floors.'
+      : 'Plan loaded. Now drop a pin where you are standing.');
+    sync(); chips(); draw();
+    return;
+  }
+  var f=files[i], r=new FileReader();
+  r.onload=function(){
+    prepare(r.result, true, function(img, data){
+      if(img){
+        var m=newMap(img, data, f.name);
+        S.maps.push(m);
+        store.putImage(m.id, imageRec(m));
+        askPersist();
+      }
+      addNext(files, i+1, startCount);
+    });
+  };
+  r.onerror=function(){ addNext(files, i+1, startCount); };
+  r.readAsDataURL(f);
+}
+
+function newMap(img, data, filename){
+  var name = (filename||'Plan').replace(/\.[^.]+$/,'').slice(0,24) || 'Plan';
+  var m = { id:newId(), name:name, data:data, img:img, w:img.naturalWidth, h:img.naturalHeight,
+            pos:null, heading:null, northOffset:0, cx:0, cy:0, scale:1 };
+  fit(m); return m;
+}
+function fit(m){
+  m.cx=m.w/2; m.cy=m.h/2;
+  m.scale = clampScale(Math.min((W||390)/m.w, (H||700)/m.h)*0.92);
+}
+
+// Turns a data URL into a ready-to-draw picture, shrinking big photos to 2600 px
+// on their long side when asked. cb(img, dataUrl) or cb(null, null).
+function prepare(dataUrl, downscale, cb, quiet){
+  var im=new Image(), MAX=2600;
+  function fail(){
+    if(!quiet) say('One file was not an image this browser can open. HEIC photos sometimes fail, so export as JPEG.', true);
+    cb(null,null);
+  }
+  im.onload=function(){
+    var w=im.naturalWidth, h=im.naturalHeight;
+    if(!w || !h){ fail(); return; }                // e.g. an SVG with no size
+    if(!downscale || Math.max(w,h)<=MAX){ cb(im, dataUrl); return; }
+    var d2=null;
+    try{
+      var k=MAX/Math.max(w,h), c=document.createElement('canvas');
+      c.width=Math.round(w*k); c.height=Math.round(h*k);
+      var g=c.getContext('2d');                    // null when iOS has run out of canvas memory
+      if(g){ g.drawImage(im,0,0,c.width,c.height); d2=c.toDataURL('image/jpeg',0.88); }
+      c.width=c.height=0;                          // give the canvas memory back straight away
+    }catch(e){ d2=null; }
+    if(!d2 || d2.indexOf('data:image/')!==0){ cb(im, dataUrl); return; }   // could not shrink: keep the original
+    var im2=new Image();
+    im2.onload=function(){ cb(im2,d2); };
+    im2.onerror=function(){ cb(im, dataUrl); };
+    im2.src=d2;
+  };
+  im.onerror=fail;
+  im.src=dataUrl;
+}
+
+function show(){
+  $('empty').classList.add('hidden');
+  $('head').classList.remove('hidden');
+  $('side').classList.remove('hidden');
+  $('dock').classList.remove('hidden');
+}
+
+// ------------------------------------------------------------ files (backup / sharing)
+function saveProject(){
+  if(!S.maps.length){ say('Nothing to save yet.', true); return; }
+  var out = { v:2, maps:S.maps.map(function(m){
+    return { name:m.name, image:m.data, pos:m.pos, heading:m.heading, northOffset:m.northOffset };
+  })};
+  var text=JSON.stringify(out), fname='floorplans.map.json';
+
+  // A Home Screen app on iPhone cannot download files, but it can hand one to the
+  // share sheet, which has "Save to Files".
+  var file=null;
+  try{ file = new File([text], fname, {type:'application/json'}); }catch(e){}
+  if(file && IOS && standalone() && navigator.canShare && navigator.canShare({files:[file]})){
+    navigator.share({files:[file]}).then(function(){
+      say('Shared '+fname+' with all '+plural(S.maps.length,'plan')+'. Keep it somewhere safe and open it here any time.');
+    }, function(err){
+      if(err && err.name==='AbortError') say('Not saved.');
+      else say('Could not open the share sheet ('+(err && err.name || 'error')+').', true);
+    });
+    return;
+  }
+  var blob=new Blob([text],{type:'application/json'});
+  var url=URL.createObjectURL(blob), a=document.createElement('a');
+  a.href=url; a.download=fname;
+  document.body.appendChild(a); a.click(); a.remove();
+  // Safari may ask "Download?" first; the file is only fetched once that is answered
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 120000);
+  say('Saving '+fname+' ('+plural(S.maps.length,'plan')+') to your downloads. If the browser asks, allow it.');
+}
+
+$('fileJson').onchange=function(e){
+  var f=e.target.files[0]; e.target.value='';
+  if(!f) return;
+  var r=new FileReader();
+  r.onload=function(){
+    var d;
+    try{ d=JSON.parse(r.result); }catch(err){ say('That file is not a saved map.', true); return; }
+    var list = (d && Array.isArray(d.maps)) ? d.maps
+      : (d && d.image ? [{name:'Plan', image:d.image, pos:d.pos, heading:d.heading, northOffset:d.northOffset}] : null);
+    if(!list || !list.length){ say('That file is not a saved map.', true); return; }
+    say('Opening '+plural(Math.min(list.length, MAX_OPEN),'plan')+'…');
+    decodeSaved(list, function(incoming){
+      if(!incoming.length){ say('That file had no usable plans.', true); return; }
+      var have=S.maps.length+S.unread.length;
+      if(!have){ takeIncoming(incoming, true); return; }
+      dialog({ title:'Open '+f.name+'?',
+        msg:'It has '+plural(incoming.length,'plan')+'. You have '+plural(have,'plan')+' saved on this device.',
+        ok:'Add to my plans', onOk:function(){ takeIncoming(incoming, false); },
+        alt:'Replace my plans', altDanger:true, onAlt:function(){ takeIncoming(incoming, true); },
+        onNo:function(){ say('Nothing changed.'); } });
+    });
+  };
+  r.onerror=function(){ say('Could not read that file.', true); };
+  r.readAsText(f);
+};
+
+// Saved files can come from anyone, so only the fields we need are taken, and checked.
+var MAX_OPEN=300;
+function decodeSaved(list, done){
+  var out=[], i=0, n=Math.min(list.length, MAX_OPEN);
+  (function next(){
+    while(i<n){                                    // a loop, not recursion: junk entries are skipped cheaply
+      var at=i, rec=list[i++];
+      if(!rec || typeof rec.image!=='string' || rec.image.indexOf('data:image/')!==0) continue;
+      decodeOne(rec, at, out, next);
+      return;
+    }
+    done(out);
+  })();
+}
+function decodeOne(rec, at, out, next){
+  prepare(rec.image, false, function(img, data){
+    if(img){
+      var m=newMap(img, data, 'Plan '+(at+1));
+      if(rec.name!=null && String(rec.name).trim()) m.name = String(rec.name).trim().slice(0,24);
+      m.pos = cleanPos(rec.pos);
+      m.heading = num(rec.heading);
+      m.northOffset = num(rec.northOffset)||0;
+      if(m.pos){ m.cx=m.pos.x; m.cy=m.pos.y; }
+      out.push(m);
+    }
+    next();
+  }, true);
+}
+
+function takeIncoming(list, replace){
+  if(replace){
+    S.maps=list; S.unread=[]; S.idx=0;
+    var imgs={};
+    list.forEach(function(m){ imgs[m.id]=imageRec(m); });
+    store.replaceAll(imgs, session());
+  }else{
+    var start=S.maps.length;
+    list.forEach(function(m){ S.maps.push(m); store.putImage(m.id, imageRec(m)); });
+    S.idx=start;
+    saveNow();
+  }
+  askPersist();
+  show(); applyCompass();
+  if(store.locked()) say(READ_FAIL, true);
+  else say((replace?'Opened ':'Added ')+plural(list.length,'plan')+', pins and alignment included.');
+  sync(); chips(); draw();
+}
+
+// ------------------------------------------------------------ start-up
+function emptyExtras(){
+  var tip=$('tip'), t='', warn=false;
+  if(store.state()==='off'){ t=NO_STORE; warn=true; }
+  else if(IOS && !standalone()) t='Tip: before you start, tap Share, then "Add to Home Screen", and use it from there. It opens full screen, works offline, and Safari will not clear your plans. The Home Screen app keeps its own plans, separate from Safari.';
+  else if(MAC_SAFARI && !standalone()) t='Tip: in Safari choose File, then "Add to Dock", and use it from there. It works offline and Safari will not clear your plans. The Dock app keeps its own plans, separate from Safari.';
+  tip.textContent=t;
+  tip.className = t ? (warn ? 'warn' : '') : 'hidden';
+}
+
+var booted=false, bootSlow=0, bootDog=0;
+function boot(){
+  bootSlow=setTimeout(function(){ if(!booted) $('loading').classList.remove('hidden'); }, 500);
+  // A read or a picture that never finishes must not leave a blank screen for ever,
+  // and must not let later writes land on top of plans that were never read.
+  bootDog=setTimeout(bootFailed, 20000);
+  (function attempt(n){
+    store.load().then(restoreSaved, function(){ if(n<1) attempt(n+1); else bootFailed(); });
+  })(0);
+}
+function bootFailed(){
+  if(booted) return;
+  store.lock();
+  finishBoot([], null, [], true);
+}
+function restoreSaved(saved){
+  if(booted) return;
+  var sess = saved && saved.session;
+  var recs = (sess && Array.isArray(sess.maps)) ? sess.maps.slice() : [];
+  // Images with no session entry: added just before the page was closed, before the
+  // session caught up. Bring them back rather than lose them.
+  if(saved){
+    var known={};
+    recs.forEach(function(r){ if(r && r.id) known[r.id]=1; });
+    Object.keys(saved.images).forEach(function(id){
+      if(!known[id]) recs.push({ id:id, name:(saved.images[id] && saved.images[id].name) || 'Plan' });
+    });
+  }
+  var out=[], unread=[], i=0;
+  (function next(){
+    while(i<recs.length){
+      var rec=recs[i++];
+      if(!rec || typeof rec!=='object') continue;
+      var img=saved.images[rec.id];
+      if(!img || typeof img.data!=='string') continue;   // no picture stored for it: nothing to keep
+      restoreOne(rec, img.data, out, unread, next);
+      return;
+    }
+    finishBoot(out, sess, unread, false);
+  })();
+}
+function restoreOne(rec, data, out, unread, next){
+  prepare(data, false, function(im){
+    if(im){
+      var m=newMap(im, data, 'Plan');
+      m.id=rec.id;
+      if(rec.name) m.name=String(rec.name).slice(0,24);
+      m.pos=cleanPos(rec.pos);
+      m.heading=num(rec.heading);
+      m.northOffset=num(rec.northOffset)||0;
+      if(num(rec.scale) && rec.scale>0 && num(rec.cx)!=null && num(rec.cy)!=null){
+        m.cx=rec.cx; m.cy=rec.cy; m.scale=clampScale(rec.scale);
+      }
+      out.push(m);
+    }else{
+      // could be a one-off (iOS short of memory): keep it, picture and all, for next time
+      unread.push(rec);
+    }
+    next();
+  }, true);
+}
+function unreadMsg(){
+  var n=S.unread.length;
+  return plural(n,'saved plan')+' could not be opened this time. '+(n===1?'It is':'They are')+
+    ' still stored: close the app completely and open it again to try again.';
+}
+function finishBoot(maps, sess, unread, failed){
+  if(booted) return;
+  booted=true;
+  clearTimeout(bootSlow); clearTimeout(bootDog);
+  $('loading').classList.add('hidden');
+  S.maps=maps; S.unread=unread||[];
+  S.ready=!failed;
+  if(!maps.length){
+    S.idx=-1; goEmpty();
+    if(failed) say(READ_FAIL, true);
+    else if(S.unread.length) say(unreadMsg(), true);
+    return;
+  }
+  S.trackUp = !!(sess && sess.trackUp);
+  var i = sess ? num(sess.idx) : null;
+  S.idx = (i!=null && i>=0 && i<maps.length) ? Math.floor(i) : 0;
+  askPersist();
+  show();
+  if(S.unread.length) say(unreadMsg(), true);
+  else say('Welcome back. Your '+plural(maps.length,'plan')+(maps.length===1?' is':' are')+' saved on this device.');
+  sync(); chips(); draw();
+}
+
+// iOS Safari only shows :active (pressed) styles once the page listens for touches
+document.addEventListener('touchstart', noop, {passive:true});
+
+// labels acting as buttons: make Enter and Space work from the keyboard too
+Array.prototype.forEach.call(document.querySelectorAll('label[role=button]'), function(el){
+  el.addEventListener('keydown', function(e){
+    if(e.key==='Enter' || e.key===' '){ e.preventDefault(); el.click(); }
+  });
+});
+
+resize();
+boot();
+
+// Offline copy of the page itself (not of your plans, which are already local).
+if('serviceWorker' in navigator &&
+   (location.protocol==='https:' || location.hostname==='localhost' || location.hostname==='127.0.0.1')){
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('sw.js').catch(noop);
+  });
+}
+})();
+</script>
+</body>
+</html>
